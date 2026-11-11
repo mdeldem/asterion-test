@@ -1,5 +1,8 @@
 # https://gist.github.com/melix/421c742a946e91c123ee09ce1d2ef86e
 
+import argparse
+import re
+import sys
 from pathlib import Path
 from typing import Callable, cast
 
@@ -10,9 +13,6 @@ from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.wcs import WCS
 from PIL import Image, ImageDraw, ImageFont
-
-
-SOURCE_FILE = Path("data/IC5070_V1490_Cyg_2026_06_20_stack_10x180sec-V.fits")
 
 
 def create_matches_jpg(
@@ -294,43 +294,167 @@ def _draw_north_east_axes(
         )
 
 
+def _discover_series(first_file: Path) -> list[Path]:
+    """Trouve les fichiers du même répertoire dont le compteur final varie."""
+    if not first_file.is_file():
+        raise ValueError(f"Le fichier de départ n'existe pas : {first_file}")
+
+    suffix = "".join(first_file.suffixes)
+    if not suffix:
+        raise ValueError(f"Le fichier de série doit avoir une extension : {first_file.name}")
+    first_stem = first_file.name[: -len(suffix)]
+    match = re.fullmatch(r"(?P<prefix>.+)-(?P<number>\d+)", first_stem)
+    if match is None:
+        raise ValueError(
+            "Le nom de série doit se terminer par un tiret et un compteur numérique "
+            "avant son extension, par exemple t_NSV 11142-001.fits."
+        )
+
+    prefix = re.escape(match.group("prefix"))
+    series_pattern = re.compile(rf"{prefix}-(\d+)", re.IGNORECASE)
+    files_with_numbers: list[tuple[int, Path]] = []
+    for candidate in first_file.parent.iterdir():
+        if not candidate.is_file():
+            continue
+        candidate_suffix = "".join(candidate.suffixes)
+        if candidate_suffix.casefold() != suffix.casefold():
+            continue
+        candidate_stem = candidate.name[: -len(candidate_suffix)]
+        candidate_match = series_pattern.fullmatch(candidate_stem)
+        if candidate_match is not None:
+            files_with_numbers.append((int(candidate_match.group(1)), candidate.resolve()))
+
+    return [path for _, path in sorted(files_with_numbers, key=lambda item: (item[0], item[1].name.casefold()))]
+
+
+def _process_file(
+    solver: asterion.Solver,
+    source_file: Path,
+    save_fits: bool,
+    save_jpg: bool,
+    output_dir: Path | None,
+) -> bool:
+    """Résout une image et enregistre les formats demandés en cas de succès."""
+    with fits.open(source_file) as hdul:
+        primary_hdu = cast(fits.PrimaryHDU, hdul[0])
+        data = primary_hdu.data
+        if not isinstance(data, np.ndarray):
+            raise TypeError(
+                f"Un tableau NumPy était attendu, reçu : {type(data).__name__}"
+            )
+
+        result = solver.solve(data.astype(np.float32))
+        print(f"\n{source_file} : {result}")
+        if not result.solved:
+            print(f"Aucune solution astrométrique pour {source_file}")
+            return False
+
+        if result.wcs is None:
+            raise RuntimeError("La résolution a réussi sans fournir de WCS.")
+        wcs = WCS(result.wcs)
+        print("\nwcs")
+        print(wcs)
+        print(f"\nmatched_stars : {result.matched_stars}")
+        for match in result.matches:
+            print(match)
+
+        if save_fits or save_jpg:
+            assert output_dir is not None
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+        if save_fits:
+            assert output_dir is not None
+            fits_file = output_dir / f"{source_file.stem}_solved.fits"
+            primary_hdu.header.update(wcs.to_header(relax=True))
+            hdul.writeto(fits_file, overwrite=True, output_verify="ignore")
+            print(f"Fichier FITS résolu sauvegardé : {fits_file}")
+
+        if save_jpg:
+            assert output_dir is not None
+            if result.scale is None:
+                raise RuntimeError("La résolution a réussi sans fournir d'échelle.")
+            jpg_file = output_dir / f"{source_file.stem}_solved.jpg"
+            create_matches_jpg(data, result.matches, result.scale, wcs, jpg_file)
+            print(f"Image JPG avec étoiles appariées sauvegardée : {jpg_file}")
+
+    return True
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Résout une ou plusieurs images FITS avec Asterion."
+    )
+    parser.add_argument(
+        "inputs",
+        nargs="+",
+        type=Path,
+        help="Chemin(s) vers les fichiers FITS à traiter.",
+    )
+    parser.add_argument(
+        "--series",
+        action="store_true",
+        help="Interprète l'unique fichier fourni comme modèle de série (compteur final).",
+    )
+    parser.add_argument(
+        "--save-fits",
+        action="store_true",
+        help="Sauvegarde les FITS calibrés avec le suffixe _solved.fits.",
+    )
+    parser.add_argument(
+        "--save-jpg",
+        action="store_true",
+        help="Sauvegarde les JPG annotés avec le suffixe _solved.jpg.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Répertoire de sortie commun aux fichiers sauvegardés (chemin relatif depuis le répertoire courant).",
+    )
+    args = parser.parse_args()
+
+    save_requested = args.save_fits or args.save_jpg
+    if save_requested and args.output_dir is None:
+        parser.error("--output-dir est obligatoire avec --save-fits ou --save-jpg.")
+    if args.output_dir is not None and not save_requested:
+        parser.error("--output-dir nécessite --save-fits et/ou --save-jpg.")
+    if args.series and len(args.inputs) != 1:
+        parser.error("--series doit être utilisé avec un seul fichier de départ.")
+
+    try:
+        if args.series:
+            input_files = _discover_series(args.inputs[0].expanduser().resolve())
+        else:
+            input_files = [path.expanduser().resolve() for path in args.inputs]
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
+
+    output_dir = args.output_dir.expanduser().resolve() if args.output_dir else None
+    if save_requested:
+        output_stems = [path.stem.casefold() for path in input_files]
+        if len(output_stems) != len(set(output_stems)):
+            parser.error(
+                "Plusieurs entrées ont le même nom de base; les sorties se chevaucheraient dans le répertoire choisi."
+            )
+
+    failed_files = 0
     with asterion.Solver() as solver:
-        with fits.open(SOURCE_FILE) as hdul:
-            primary_hdu = cast(fits.PrimaryHDU, hdul[0])
-            data = primary_hdu.data
-            # Vérifie que les données lues sont bien un tableau NumPy.
-            if not isinstance(data, np.ndarray):
-                raise TypeError(
-                    f"Un tableau NumPy était attendu, reçu : {type(data).__name__}"
+        for source_file in input_files:
+            try:
+                solved = _process_file(
+                    solver,
+                    source_file,
+                    args.save_fits,
+                    args.save_jpg,
+                    output_dir,
                 )
+                if not solved:
+                    failed_files += 1
+            except Exception as error:
+                failed_files += 1
+                print(f"Erreur pour {source_file} : {error}", file=sys.stderr)
 
-            pixels = data.astype(np.float32)
-            result = solver.solve(pixels)
-            print(result)
-
-            if result.solved:
-                print("\nwcs")
-                wcs = WCS(result.wcs)
-                print(wcs)
-
-                print("\nmatched_stars")
-                print(result.matched_stars)
-                for match in result.matches:
-                    print(match)
-
-                output_dir = SOURCE_FILE.parent / "output"
-                output_dir.mkdir(parents=True, exist_ok=True)
-                output_file = output_dir / f"{SOURCE_FILE.stem}_solved.fits"
-                primary_hdu.header.update(wcs.to_header(relax=True))
-                hdul.writeto(output_file, overwrite=True, output_verify="ignore")
-                print(f"\nFichier résolu sauvegardé : {output_file}")
-
-                if result.scale is None:
-                    raise RuntimeError("La résolution a réussi sans fournir d'échelle.")
-                jpg_file = output_dir / f"{SOURCE_FILE.stem}_solved.jpg"
-                create_matches_jpg(data, result.matches, result.scale, wcs, jpg_file)
-                print(f"Image avec étoiles appariées sauvegardée : {jpg_file}")
+    if failed_files:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
