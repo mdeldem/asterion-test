@@ -1,0 +1,1 @@
+Test du solver [Asterion](https://github.com/asterion-solver/asterion)
