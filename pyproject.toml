@@ -1,0 +1,22 @@
+[project]
+name = "asterion-test"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Marc Deldem", email = "marc.deldem@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "asterion-solver>=0.4.2",
+    "astropy>=8.0.2",
+    "numpy>=2.5.4",
+    "pandas>=3.1.1",
+]
+
+[project.scripts]
+asterion-test = "asterion_test.test_asterion:main"
+
+[build-system]
+requires = ["uv_build>=0.9.17,<0.10.0"]
+build-backend = "uv_build"
