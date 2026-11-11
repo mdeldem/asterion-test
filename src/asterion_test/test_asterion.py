@@ -92,8 +92,13 @@ def _apply_sky_orientation_symmetries(
     center = SkyCoord(ra=ra * u.deg, dec=dec * u.deg)
     north = center.directional_offset_by(0 * u.deg, 1 * u.arcmin)
     east = center.directional_offset_by(90 * u.deg, 1 * u.arcmin)
-    north_x, north_y = wcs.world_to_pixel_values(north.ra.deg, north.dec.deg)
-    east_x, east_y = wcs.world_to_pixel_values(east.ra.deg, east.dec.deg)
+    north_ra, north_dec = north.ra, north.dec
+    east_ra, east_dec = east.ra, east.dec
+    if north_ra is None or north_dec is None or east_ra is None or east_dec is None:
+        raise ValueError("Les coordonnées célestes doivent fournir RA et déclinaison.")
+
+    north_x, north_y = wcs.world_to_pixel_values(north_ra.deg, north_dec.deg)
+    east_x, east_y = wcs.world_to_pixel_values(east_ra.deg, east_dec.deg)
 
     flip_horizontally = east_x > center_x
     flip_vertically = north_y > center_y
@@ -219,7 +224,7 @@ def _draw_celestial_grid(
     width: int,
     height: int,
     transform_pixel: Callable[[float, float], tuple[float, float]],
-    font: ImageFont.ImageFont,
+    font: ImageFont.ImageFont | ImageFont.FreeTypeFont,
 ) -> None:
     """Projette les méridiens d'ascension droite et parallèles de déclinaison."""
     edge = np.linspace(0, 1, 120)
@@ -266,7 +271,7 @@ def _draw_north_east_axes(
     height: int,
     north_direction: tuple[float, float],
     east_direction: tuple[float, float],
-    font: ImageFont.ImageFont,
+    font: ImageFont.ImageFont | ImageFont.FreeTypeFont,
 ) -> None:
     """Dessine le repère cardinal en respectant l'angle réel des directions célestes."""
     origin = (width - 72, 78)
