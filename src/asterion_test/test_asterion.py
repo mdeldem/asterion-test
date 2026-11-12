@@ -349,19 +349,31 @@ def _process_file(
             )
 
         result = solver.solve(data.astype(np.float32))
-        print(f"\n{source_file} : {result}")
+        print(f"\n{source_file}\n{result}")
         if not result.solved:
             print(f"Aucune solution astrométrique pour {source_file}")
             return False
+        print(f"rms={result.rms}")
+        print(f"detected stars={result.stars}")
+        print(f"matched stars={result.matched_stars}")
 
         if result.wcs is None:
             raise RuntimeError("La résolution a réussi sans fournir de WCS.")
         wcs = WCS(result.wcs)
         print("\nwcs")
         print(wcs)
+
         print(f"\nmatched_stars : {result.matched_stars}")
         for match in result.matches:
             print(match)
+
+        # Exemple de conversion pixels <-> sky
+        # x = 50
+        # y = 50
+        # (ra,dec) = result.pixel_to_sky(x, y)
+        # print(f"\nFrom pixels ({x},{y}) to sky ({ra},{dec})")
+        # (x,y) = result.sky_to_pixel(ra, dec)
+        # print(f"From sky ({ra},{dec}) to pixels ({x},{y})")
 
         if save_fits or save_jpg:
             assert output_dir is not None
